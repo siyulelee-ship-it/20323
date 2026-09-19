@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>공부할 시간</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  :root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  html,body{background:#fff;color:#18181b}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR",sans-serif;margin:0}
+  .bg-fade{transition:background-color .8s ease}
+  @keyframes pulseRing{0%{transform:scale(.92);opacity:.55}50%{transform:scale(1.04);opacity:.12}100%{transform:scale(.92);opacity:.55}}
+  .pulse-ring{animation:pulseRing 3.6s ease-in-out infinite}
+  @keyframes floaty{0%{transform:translate(0,0)}50%{transform:translate(14px,-18px)}100%{transform:translate(0,0)}}
+  .floaty{animation:floaty 9s ease-in-out infinite}
+  @keyframes wave{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+  .wave{animation:wave 12s linear infinite}
+  @keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-9px)}40%{transform:translateX(9px)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}}
+  .shake{animation:shake .5s ease-in-out}
+  @keyframes flash{0%,100%{background:rgba(220,38,38,.93)}50%{background:rgba(153,27,27,.96)}}
+  .flash{animation:flash 1.4s ease-in-out infinite}
+  @keyframes twinkle{0%,100%{opacity:.25;transform:scale(.7)}50%{opacity:1;transform:scale(1.15)}}
+  .twinkle{animation:twinkle 2.6s ease-in-out infinite;transform-box:fill-box;transform-origin:center}
+  @keyframes wiggle{0%,100%{transform:rotate(-4deg)}50%{transform:rotate(4deg)}}
+  .wiggle{animation:wiggle 1.8s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 100%}
+  @keyframes bounceSoft{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+  .bounce-soft{animation:bounceSoft 3s ease-in-out infinite}
+  .tnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback} = React;
+const PRESETS=[
+ {key:'warm',icon:'🌱',tint:'#dcfce7',name:'몸풀기',desc:'가볍게 시동 걸기',f:25,b:5},
+ {key:'hard',icon:'🔥',tint:'#ffedd5',name:'빡공',desc:'제대로 파고들기',f:50,b:10},
+ {key:'cram',icon:'⚡',tint:'#fef9c3',name:'벼락치기',desc:'내일이 시험이다',f:90,b:15},
+];
+const fmt=s=>`${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+function beep(kind){
+  try{
+    const C=window.AudioContext||window.webkitAudioContext; const ctx=new C();
+    const seq = kind==='fail'?[[220,0],[165,.18]]:[[660,0],[880,.16],[1320,.32]];
+    seq.forEach(([f,t])=>{const o=ctx.createOscillator(),g=ctx.createGain();o.frequency.value=f;o.type='sine';
+      g.gain.setValueAtTime(.0001,ctx.currentTime+t);g.gain.exponentialRampToValueAtTime(.25,ctx.currentTime+t+.03);
+      g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+t+.5);o.connect(g);g.connect(ctx.destination);
+      o.start(ctx.currentTime+t);o.stop(ctx.currentTime+t+.55);});
+  }catch(e){}
+}
+
+const DEFAULTS={score:90,streak:0,coupons:0,done:0,sel:'hard',cf:40,cb:8};
+const canStore=(()=>{try{localStorage.setItem('__t','1');localStorage.removeItem('__t');return true;}catch(e){return false;}})();
+const store={
+  get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));return true;}catch(e){return false;}},
+  del(k){try{localStorage.removeItem(k);}catch(e){}}
+};
+function makeSalt(){
+  try{const a=new Uint8Array(12);crypto.getRandomValues(a);return Array.from(a,b=>b.toString(16).padStart(2,'0')).join('');}
+  catch(e){return String(Math.random()).slice(2)+Date.now();}
+}
+async function hashPw(salt,pw){
+  const txt=salt+':'+pw;
+  try{
+    const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(txt));
+    return Array.from(new Uint8Array(buf),b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){let h=5381;for(let i=0;i<txt.length;i++){h=((h<<5)+h+txt.charCodeAt(i))|0;}return 'f'+h;}
+}
+function loadUser(id){
+  const d={...DEFAULTS,...(store.get('gst:data:'+id)||{})};
+  let notice=null;
+  if(store.get('gst:active:'+id)){
+    d.score=Math.max(0,d.score-10);d.streak=0;
+    store.del('gst:active:'+id);store.set('gst:data:'+id,d);
+    notice='지난 집중 도중 앱을 떠났습니다. 예상 점수 −10, 연속 기록 0';
+  }
+  return {user:id,data:d,notice};
+}
+function bootLoad(){
+  const id=store.get('gst:session');
+  const users=store.get('gst:users')||{};
+  if(id&&users[id])return loadUser(id);
+  return {user:null,data:DEFAULTS,notice:null};
+}
+
+function Hero(){
+  return(
+  <svg viewBox="0 0 320 130" className="mx-auto h-28 w-auto" aria-hidden="true">
+    <ellipse cx="160" cy="122" rx="135" ry="6" fill="#f4f4f5"/>
+    <rect x="66" y="94" width="112" height="24" rx="6" fill="#bfdbfe"/>
+    <rect x="76" y="101" width="92" height="4" rx="2" fill="#93c5fd"/>
+    <rect x="80" y="70" width="94" height="24" rx="6" fill="#fbcfe8"/>
+    <rect x="90" y="77" width="74" height="4" rx="2" fill="#f9a8d4"/>
+    <rect x="72" y="48" width="102" height="22" rx="6" fill="#fde68a"/>
+    <rect x="82" y="54" width="82" height="4" rx="2" fill="#fcd34d"/>
+    <rect x="96" y="38" width="66" height="9" rx="2" fill="#fdba74"/>
+    <polygon points="162,38 162,47 174,42.5" fill="#fde68a"/>
+    <polygon points="170,40.5 170,44.5 174,42.5" fill="#18181b"/>
+    <g className="wiggle">
+      <circle cx="216" cy="46" r="9" fill="#fca5a5" stroke="#18181b" strokeWidth="2.5"/>
+      <circle cx="264" cy="46" r="9" fill="#fca5a5" stroke="#18181b" strokeWidth="2.5"/>
+      <line x1="222" y1="106" x2="216" y2="118" stroke="#18181b" strokeWidth="3" strokeLinecap="round"/>
+      <line x1="258" y1="106" x2="264" y2="118" stroke="#18181b" strokeWidth="3" strokeLinecap="round"/>
+      <circle cx="240" cy="78" r="34" fill="#fff" stroke="#18181b" strokeWidth="3"/>
+      <line x1="240" y1="49" x2="240" y2="54" stroke="#d4d4d8" strokeWidth="2.5" strokeLinecap="round"/>
+      <line x1="211" y1="78" x2="216" y2="78" stroke="#d4d4d8" strokeWidth="2.5" strokeLinecap="round"/>
+      <line x1="264" y1="78" x2="269" y2="78" stroke="#d4d4d8" strokeWidth="2.5" strokeLinecap="round"/>
+      <circle cx="231" cy="75" r="2.6" fill="#18181b"/>
+      <circle cx="249" cy="75" r="2.6" fill="#18181b"/>
+      <circle cx="226" cy="84" r="4" fill="#fbcfe8"/>
+      <circle cx="254" cy="84" r="4" fill="#fbcfe8"/>
+      <path d="M235 84 Q240 90 245 84" fill="none" stroke="#18181b" strokeWidth="2.2" strokeLinecap="round"/>
+    </g>
+    <text x="34" y="44" fontSize="18" fill="#fcd34d" className="twinkle">✦</text>
+    <text x="196" y="24" fontSize="13" fill="#93c5fd" className="twinkle" style={{animationDelay:'-1s'}}>✦</text>
+    <text x="292" y="30" fontSize="16" fill="#f9a8d4" className="twinkle" style={{animationDelay:'-1.8s'}}>✦</text>
+    <text x="40" y="96" fontSize="12" fill="#86efac" className="twinkle" style={{animationDelay:'-.6s'}}>✦</text>
+  </svg>);
+}
+
+function App(){
+  const boot=useRef(null); if(!boot.current)boot.current=bootLoad(); const B=boot.current;
+  const [screen,setScreen]=useState(B.user?'setup':'auth');
+  const [sel,setSel]=useState(B.data.sel);
+  const [cf,setCf]=useState(B.data.cf), [cb,setCb]=useState(B.data.cb);
+  const [plan,setPlan]=useState({name:'빡공',f:50,b:10});
+  const [phase,setPhase]=useState('focus');
+  const [left,setLeft]=useState(0);
+  const [total,setTotal]=useState(1);
+  const [running,setRunning]=useState(false);
+  const [score,setScore]=useState(B.data.score);
+  const [streak,setStreak]=useState(B.data.streak);
+  const [coupons,setCoupons]=useState(B.data.coupons);
+  const [done,setDone]=useState(B.data.done);
+  const [fail,setFail]=useState(false);
+  const [toast,setToast]=useState(null);
+  const [runSec,setRunSec]=useState(0);
+  const [grace,setGrace]=useState(false);
+  const [devOpen,setDevOpen]=useState(false);
+  const [devOk,setDevOk]=useState(false);
+  const [devCode,setDevCode]=useState('');
+  const phaseRef=useRef(phase), runRef=useRef(running), failRef=useRef(fail);
+  const graceT=useRef(null), hiddenAt=useRef(0);
+  phaseRef.current=phase; runRef.current=running; failRef.current=fail;
+  const [user,setUser]=useState(B.user);
+  const [notice,setNotice]=useState(B.notice);
+  const [mode,setMode]=useState('login');
+  const [aid,setAid]=useState(''), [apw,setApw]=useState(''), [apw2,setApw2]=useState('');
+  const [aerr,setAerr]=useState(''), [abusy,setAbusy]=useState(false);
+  const userRef=useRef(user), runSecRef=useRef(0);
+  userRef.current=user; runSecRef.current=runSec;
+  const mark=(on)=>{const u=userRef.current;if(!u)return;if(on)store.set('gst:active:'+u,{t:Date.now()});else store.del('gst:active:'+u);};
+
+  const showToast=(t)=>{setToast(t);setTimeout(()=>setToast(null),2600);};
+
+  const failRoutine=useCallback(()=>{
+    setRunning(false);setFail(true);mark(false);
+    setScore(s=>Math.max(0,s-10));setStreak(0);beep('fail');
+  },[]);
+
+  useEffect(()=>{
+    const h=()=>{
+      const armed = phaseRef.current==='focus'&&runRef.current&&!failRef.current;
+      if(document.visibilityState==='hidden'){
+        if(!armed)return;
+        hiddenAt.current=Date.now();
+        graceT.current=setTimeout(()=>{graceT.current=null;failRoutine();},3000);
+      }else{
+        const away=hiddenAt.current?Date.now()-hiddenAt.current:0;
+        if(graceT.current){clearTimeout(graceT.current);graceT.current=null;}
+        hiddenAt.current=0;
+        if(!armed)return;
+        if(away>3000){failRoutine();}
+        else if(away>0){setGrace(true);setTimeout(()=>setGrace(false),2800);}
+      }
+    };
+    const onHide=(e)=>{if(!e.persisted&&phaseRef.current==='focus'&&runSecRef.current<30)mark(false);};
+    document.addEventListener('visibilitychange',h);
+    window.addEventListener('pagehide',h);
+    window.addEventListener('pagehide',onHide);
+    return()=>{document.removeEventListener('visibilitychange',h);window.removeEventListener('pagehide',h);window.removeEventListener('pagehide',onHide);};
+  },[failRoutine]);
+
+  // 1) 1초마다 남은 시간만 줄인다 (단계가 바뀌어도 인터벌은 유지)
+  useEffect(()=>{
+    if(!running)return;
+    const id=setInterval(()=>{
+      setRunSec(x=>x+1);
+      setLeft(v=>Math.max(0,v-1));
+    },1000);
+    return()=>clearInterval(id);
+  },[running]);
+
+  // 2) 0초가 되면 집중 <-> 휴식 전환
+  useEffect(()=>{
+    if(!running||left>0)return;
+    beep('done');
+    setRunSec(0);
+    if(phase==='focus'){
+      setScore(s=>Math.min(100,s+2));
+      setDone(d=>d+1);
+      const n=streak+1;
+      setStreak(n);
+      if(n%3===0){setCoupons(c=>c+1);showToast("연속 3회 달성! '5분만!' 쿠폰 +1");}
+      else showToast('집중 완수! 예상 점수 +2');
+      mark(false);setPhase('break');setTotal(plan.b*60);setLeft(plan.b*60);
+    }else{
+      showToast('휴식 끝. 다시 집중할 시간이야.');
+      mark(true);setPhase('focus');setTotal(plan.f*60);setLeft(plan.f*60);
+    }
+  },[left,running]);
+
+  // 자동 저장: 로그인 상태에서 값이 바뀔 때마다 이 브라우저에 기록
+  useEffect(()=>{
+    if(!user)return;
+    store.set('gst:data:'+user,{score,streak,coupons,done,sel,cf,cb});
+  },[user,score,streak,coupons,done,sel,cf,cb]);
+
+  const enter=(id)=>{
+    const r=loadUser(id);
+    store.set('gst:session',id);
+    setUser(id);setScore(r.data.score);setStreak(r.data.streak);setCoupons(r.data.coupons);
+    setDone(r.data.done);setSel(r.data.sel);setCf(r.data.cf);setCb(r.data.cb);
+    setNotice(r.notice);setAid('');setApw('');setApw2('');setAerr('');setScreen('setup');
+  };
+  const submitAuth=async()=>{
+    if(abusy)return;
+    setAerr('');
+    const id=aid.trim();
+    if(!/^[가-힣A-Za-z0-9_]{2,16}$/.test(id)){setAerr('아이디는 2~16자, 한글·영문·숫자·_ 만 쓸 수 있어요.');return;}
+    if(apw.length<4){setAerr('비밀번호는 4자 이상이어야 해요.');return;}
+    setAbusy(true);
+    try{
+      const users=store.get('gst:users')||{};
+      if(mode==='signup'){
+        if(apw!==apw2){setAerr('비밀번호가 서로 달라요.');return;}
+        if(users[id]){setAerr('이미 있는 아이디예요.');return;}
+        const salt=makeSalt();
+        users[id]={salt,hash:await hashPw(salt,apw)};
+        if(!store.set('gst:users',users)){setAerr('이 브라우저에서는 저장할 수 없어요. 게스트로 시작해 보세요.');return;}
+        store.set('gst:data:'+id,DEFAULTS);
+        enter(id);
+      }else{
+        const u=users[id];
+        if(!u){setAerr('없는 아이디예요.');return;}
+        if(await hashPw(u.salt,apw)!==u.hash){setAerr('비밀번호가 맞지 않아요.');return;}
+        enter(id);
+      }
+    }finally{setAbusy(false);}
+  };
+  const logout=()=>{
+    store.del('gst:session');
+    setUser(null);setScore(90);setStreak(0);setCoupons(0);setDone(0);setSel('hard');setCf(40);setCb(8);
+    setNotice(null);setMode('login');setAid('');setApw('');setApw2('');setAerr('');setScreen('auth');
+  };
+  const guest=()=>{setUser(null);setNotice(null);setScreen('setup');};
+
+  const start=()=>{
+    const p = sel==='custom'
+      ? {name:'내 맘대로',f:Math.max(1,Math.min(180,+cf||1)),b:Math.max(1,Math.min(60,+cb||1))}
+      : (()=>{const x=PRESETS.find(p=>p.key===sel);return{name:x.name,f:x.f,b:x.b};})();
+    setPlan(p);setPhase('focus');setLeft(p.f*60);setTotal(p.f*60);setRunSec(0);setNotice(null);mark(true);setRunning(true);setScreen('run');
+  };
+  const useCoupon=()=>{if(coupons<1)return;setCoupons(c=>c-1);setLeft(v=>v+300);setTotal(t=>t+300);showToast("'5분만!' 사용 — 휴식 5분 연장");};
+  const retry=()=>{setFail(false);setPhase('focus');setLeft(plan.f*60);setTotal(plan.f*60);setRunSec(0);mark(true);setRunning(true);};
+  const canReturn = runSec<30;
+  const quit=()=>{setFail(false);setRunning(false);mark(false);setScreen('setup');};
+
+  const isBreak=phase==='break';
+  const pct=Math.max(0,Math.min(1,1-left/total));
+  const R=140,C=2*Math.PI*R;
+
+  const toastEl = toast ? (
+    <div className="fixed bottom-24 left-1/2 z-[60] -translate-x-1/2 rounded-full bg-zinc-900 px-5 py-3 text-xs font-semibold text-white shadow-lg">{toast}</div>
+  ) : null;
+
+  const devPanel = (
+    <div className="fixed bottom-4 right-4 z-[45] flex flex-col items-end gap-2" style={{paddingBottom:'env(safe-area-inset-bottom,0px)'}}>
+      {devOpen&&(
+        <div className="w-60 rounded-xl border border-zinc-200 bg-white p-4 shadow-xl">
+          {!devOk?(
+            <div>
+              <p className="text-xs font-bold text-zinc-700">제작자 모드</p>
+              <input value={devCode} onChange={e=>setDevCode(e.target.value)} inputMode="numeric" placeholder="코드 입력"
+                className="mt-2 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm tnum outline-none focus:border-zinc-900"/>
+              <button onClick={()=>{if(devCode==='20120619'){setDevOk(true);showToast('제작자 모드 활성화');}else{showToast('코드가 틀렸습니다');}}}
+                className="mt-2 w-full rounded-lg bg-zinc-900 py-2 text-xs font-bold text-white">잠금 해제</button>
+            </div>
+          ):(
+            <div className="space-y-2">
+              <p className="text-xs font-bold text-zinc-700">제작자 모드 {screen==='run'?'· 타이머':'· 메뉴'}</p>
+              <div className="flex gap-2">
+                <button onClick={()=>setScore(s=>Math.max(0,s-10))} className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-bold">점수 −10</button>
+                <button onClick={()=>setScore(s=>Math.min(100,s+10))} className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-bold">점수 +10</button>
+              </div>
+              <input type="number" value={score} onChange={e=>setScore(Math.max(0,Math.min(100,+e.target.value||0)))}
+                className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm tnum outline-none focus:border-zinc-900"/>
+              <div className="flex gap-2">
+                <button onClick={()=>setCoupons(c=>c+1)} className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-bold">쿠폰 +1</button>
+                <button onClick={()=>setStreak(x=>x+1)} className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-bold">연속 +1</button>
+              </div>
+              {screen==='run'&&(
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <button onClick={()=>setLeft(v=>Math.max(1,v-60))} className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-bold">−1분</button>
+                    <button onClick={()=>setLeft(3)} className="flex-1 rounded-lg bg-zinc-900 py-2 text-xs font-bold text-white">3초 남기기</button>
+                  </div>
+                  <button onClick={()=>setRunSec(31)} className="w-full rounded-lg bg-zinc-100 py-2 text-xs font-bold">30초 경과시키기</button>
+                </div>
+              )}
+              <button onClick={()=>{setScore(90);setStreak(0);setCoupons(0);setDone(0);showToast('기록 초기화');}}
+                className="w-full rounded-lg border border-zinc-200 py-2 text-xs font-semibold text-zinc-500">전체 초기화</button>
+            </div>
+          )}
+        </div>
+      )}
+      <button onClick={()=>setDevOpen(o=>!o)} className="h-11 w-11 rounded-full border border-zinc-200 bg-white text-base shadow-md">⚙️</button>
+    </div>
+  );
+
+  if(screen==='auth'){
+    const inp="mt-1 w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-base outline-none focus:border-zinc-900";
+    const enterKey=(e)=>{if(e.key==='Enter')submitAuth();};
+    return(
+    <div className="relative min-h-screen overflow-hidden bg-white px-5 py-10 flex flex-col items-center">
+      <span className="floaty pointer-events-none absolute left-3 top-10 text-2xl opacity-60">☁️</span>
+      <span className="floaty pointer-events-none absolute right-4 top-16 text-2xl opacity-60" style={{animationDelay:'-4s'}}>✏️</span>
+      <div className="relative z-10 w-full max-w-sm">
+        <Hero/>
+        <p className="mt-4 text-center text-xs tracking-[.3em] text-zinc-400">STUDY OR DIE</p>
+        <h1 className="mt-2 text-center text-4xl font-black tracking-tight">공부할 시간</h1>
+        <p className="mt-3 text-center text-sm text-zinc-500">아이디로 기록을 저장하고 언제든 이어서 하세요.</p>
+        <div className="mt-6 flex rounded-xl bg-zinc-100 p-1">
+          {[['login','로그인'],['signup','회원가입']].map(([k,l])=>(
+            <button key={k} onClick={()=>{setMode(k);setAerr('');}}
+              className={`flex-1 rounded-lg py-2 text-sm font-bold transition ${mode===k?'bg-white text-zinc-900 shadow-sm':'text-zinc-400'}`}>{l}</button>
+          ))}
+        </div>
+        <div className="mt-4 space-y-3">
+          <label className="block text-xs font-semibold text-zinc-500">아이디
+            <input value={aid} onChange={e=>setAid(e.target.value)} onKeyDown={enterKey} type="text" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck="false" className={inp}/>
+          </label>
+          <label className="block text-xs font-semibold text-zinc-500">비밀번호
+            <input value={apw} onChange={e=>setApw(e.target.value)} onKeyDown={enterKey} type="password" autoComplete={mode==='signup'?'new-password':'current-password'} className={inp}/>
+          </label>
+          {mode==='signup'&&(
+            <label className="block text-xs font-semibold text-zinc-500">비밀번호 확인
+              <input value={apw2} onChange={e=>setApw2(e.target.value)} onKeyDown={enterKey} type="password" autoComplete="new-password" className={inp}/>
+            </label>
+          )}
+        </div>
+        {aerr&&<p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{aerr}</p>}
+        {!canStore&&<p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">이 브라우저는 저장을 막고 있어요. 게스트로만 이용할 수 있습니다.</p>}
+        <button onClick={submitAuth} disabled={abusy} className="mt-5 w-full rounded-xl bg-zinc-900 py-4 text-base font-bold text-white transition hover:bg-black active:scale-[.99] disabled:opacity-60">{mode==='signup'?'가입하고 시작하기':'로그인'}</button>
+        <button onClick={guest} className="mt-3 w-full py-2 text-sm font-semibold text-zinc-400 hover:text-zinc-700">로그인 없이 체험하기</button>
+        <p className="mt-4 text-center text-[11px] leading-relaxed text-zinc-400">기록은 이 기기의 브라우저에만 저장돼요.<br/>다른 기기에서는 이어지지 않습니다.</p>
+      </div>
+      {toastEl}
+    </div>);
+  }
+
+  if(screen==='setup'){
+    return(
+    <div className="relative min-h-screen overflow-hidden bg-white px-5 py-10 flex flex-col items-center">
+      <span className="floaty pointer-events-none absolute left-3 top-24 text-2xl opacity-60">☁️</span>
+      <span className="floaty pointer-events-none absolute right-4 top-28 text-2xl opacity-60" style={{animationDelay:'-4s'}}>✏️</span>
+      <div className="relative z-10 w-full max-w-lg">
+        <div className="mb-3 flex items-center justify-between text-xs">
+          {user?<span className="rounded-full bg-zinc-100 px-3 py-1.5 font-semibold text-zinc-600">👤 {user}</span>:<span className="text-zinc-400">게스트 · 기록이 저장되지 않아요</span>}
+          {user?<button onClick={logout} className="font-semibold text-zinc-400 hover:text-zinc-700">로그아웃</button>:<button onClick={()=>setScreen('auth')} className="font-semibold text-zinc-700 underline">로그인하고 저장하기</button>}
+        </div>
+        {notice&&<div onClick={()=>setNotice(null)} className="mb-3 rounded-xl bg-red-50 px-4 py-3 text-xs font-semibold leading-relaxed text-red-600">🚨 {notice}</div>}
+        <Hero/>
+        <p className="mt-4 text-xs tracking-[.3em] text-zinc-400">STUDY OR DIE</p>
+        <h1 className="mt-2 text-4xl font-black tracking-tight">공부할 시간</h1>
+        <p className="mt-3 text-sm leading-relaxed text-zinc-500">집중 타이머가 도는 동안 탭을 벗어나면 그 루틴은 <b className="text-red-500">즉시 실패</b>하고 예상 점수가 10점 깎입니다.</p>
+        <div className="mt-8 rounded-2xl border border-zinc-200 p-5 text-center">
+          <p className="text-xs font-semibold tracking-wide text-zinc-400">당신의 예상 시험 점수</p>
+          <p className="mt-1 text-6xl font-black tnum">{score}</p>
+          <div className="mt-3 flex justify-center gap-6 text-xs text-zinc-500">
+            <span>🔥 연속 {streak}회</span><span>🎟️ 쿠폰 {coupons}개</span><span>✅ 완수 {done}회</span>
+          </div>
+        </div>
+        <p className="mt-8 mb-3 text-sm font-semibold text-zinc-700">루틴 선택</p>
+        <div className="space-y-2">
+          {PRESETS.map(p=>(
+            <button key={p.key} onClick={()=>setSel(p.key)}
+              className={`w-full rounded-xl border p-4 text-left transition ${sel===p.key?'border-zinc-900 bg-zinc-900 text-white':'border-zinc-200 hover:border-zinc-400'}`}>
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-2xl" style={{background:p.tint}}>{p.icon}</span>
+                <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between">
+                <span className="text-base font-bold">{p.name}</span>
+                <span className={`text-sm tnum ${sel===p.key?'text-zinc-300':'text-zinc-500'}`}>{p.f}분 집중 / {p.b}분 휴식</span>
+              </div>
+              <p className={`mt-1 text-xs ${sel===p.key?'text-zinc-400':'text-zinc-400'}`}>{p.desc}</p>
+            </div>
+              </div>
+            </button>
+          ))}
+          <button onClick={()=>setSel('custom')}
+            className={`w-full rounded-xl border p-4 text-left transition ${sel==='custom'?'border-zinc-900 bg-zinc-900 text-white':'border-zinc-200 hover:border-zinc-400'}`}>
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-100 text-2xl">🎨</span>
+              <div className="min-w-0 flex-1">
+              <span className="text-base font-bold">내 맘대로</span>
+            <p className={`mt-1 text-xs ${sel==='custom'?'text-zinc-400':'text-zinc-400'}`}>집중/휴식 시간을 직접 정하기</p>
+          </div>
+            </div>
+          </button>
+          {sel==='custom'&&(
+            <div className="flex gap-3 rounded-xl bg-zinc-50 p-4">
+              {[['집중(분)',cf,setCf,180],['휴식(분)',cb,setCb,60]].map(([l,v,set,max])=>(
+                <label key={l} className="flex-1 text-xs text-zinc-500">{l}
+                  <input type="number" min="1" max={max} value={v} onChange={e=>set(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-lg font-bold tnum text-zinc-900 outline-none focus:border-zinc-900"/>
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+        <button onClick={start} className="mt-8 w-full rounded-xl bg-zinc-900 py-4 text-base font-bold text-white transition hover:bg-black active:scale-[.99]">시작하기</button>
+        <p className="mt-3 text-center text-xs text-zinc-400">시작하면 다른 탭으로 못 갑니다. 정말입니다.</p>
+        <div className="mt-8 flex justify-center gap-5 text-2xl opacity-80">
+          <span className="bounce-soft">📚</span><span className="bounce-soft" style={{animationDelay:'-1s'}}>☕</span><span className="bounce-soft" style={{animationDelay:'-2s'}}>🧠</span>
+        </div>
+      </div>
+      {devPanel}{toastEl}
+    </div>);
+  }
+
+  return(
+  <div className={`bg-fade min-h-screen ${isBreak?'bg-[#eefaf7]':'bg-white'} relative overflow-hidden`}>
+    {isBreak&&(<div className="pointer-events-none absolute inset-0">
+      <div className="floaty absolute left-[8%] top-[14%] h-28 w-52 rounded-full bg-white/70 blur-xl"></div>
+      <div className="floaty absolute right-[10%] top-[26%] h-24 w-44 rounded-full bg-sky-100/80 blur-xl" style={{animationDelay:'-3s'}}></div>
+      <div className="absolute bottom-0 left-0 w-[200%] wave">
+        <svg viewBox="0 0 1200 120" className="w-full" preserveAspectRatio="none"><path d="M0,60 C150,110 350,10 600,60 C850,110 1050,10 1200,60 L1200,120 L0,120 Z" fill="#d7f2ec"/></svg>
+      </div>
+    </div>)}
+
+    <div className="relative mx-auto flex min-h-screen max-w-lg flex-col items-center px-5 py-8">
+      <div className="w-full text-center">
+        <p className="text-[11px] font-semibold tracking-wide text-zinc-400">당신의 예상 시험 점수</p>
+        <p className="text-5xl font-black tnum text-zinc-900">{score}</p>
+        <div className="mt-2 flex justify-center gap-4 text-[11px] text-zinc-500">
+          <span>🔥 연속 {streak}회</span><span>🎟️ 쿠폰 {coupons}개</span><span>{plan.name} · {plan.f}/{plan.b}</span>
+        </div>
+      </div>
+
+      <div className="relative my-auto flex aspect-square w-[min(340px,84vw)] items-center justify-center">
+        {!isBreak&&<div className="pulse-ring absolute h-[88%] w-[88%] rounded-full bg-zinc-200"></div>}
+        <svg className="absolute h-[94%] w-[94%] -rotate-90" viewBox="0 0 320 320">
+          <circle cx="160" cy="160" r={R} fill="none" stroke={isBreak?'#c8ece4':'#f0f0f1'} strokeWidth="6"/>
+          <circle cx="160" cy="160" r={R} fill="none" stroke={isBreak?'#34b39a':'#18181b'} strokeWidth="6"
+            strokeLinecap="round" strokeDasharray={C} strokeDashoffset={C*(1-pct)} style={{transition:'stroke-dashoffset 1s linear'}}/>
+        </svg>
+        <div className="relative text-center">
+          <p className={`text-xs font-bold tracking-[.25em] ${isBreak?'text-teal-600':'text-zinc-400'}`}>{isBreak?'휴식 중':'집중 중'}</p>
+          <p className="mt-1 text-[clamp(3.5rem,17vw,4.5rem)] font-black leading-none tnum tracking-tight text-zinc-900">{fmt(left)}</p>
+          <p className="mt-2 text-xs text-zinc-400">{isBreak?'곧 다시 시작합니다':'탭을 벗어나면 실패'}</p>
+        </div>
+      </div>
+
+      <div className="w-full space-y-3">
+        {isBreak&&(
+          <button onClick={useCoupon} disabled={coupons<1}
+            className={`w-full rounded-xl py-4 text-sm font-bold transition ${coupons>0?'bg-teal-600 text-white hover:bg-teal-700':'bg-zinc-100 text-zinc-400'}`}>
+            🎟️ 5분만! 쿠폰 사용하기 ({coupons}개)
+          </button>
+        )}
+        {!isBreak&&running&&canReturn&&(
+          <button onClick={quit} className="w-full rounded-xl border border-zinc-300 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
+            돌아가기 · 페널티 없음 ({30-runSec}초 남음)
+          </button>
+        )}
+        <button onClick={()=>{if(!isBreak&&running){failRoutine();}else{quit();}}}
+          disabled={!isBreak&&running&&canReturn}
+          className={`w-full rounded-xl border py-3 text-sm font-semibold ${!isBreak&&running&&canReturn?'border-zinc-100 text-zinc-300':'border-zinc-200 text-zinc-500 hover:border-zinc-400'}`}>
+          {!isBreak&&running?'포기하기 (−10점)':'루틴 종료'}
+        </button>
+        {!isBreak&&running&&!canReturn&&<p className="text-center text-[11px] text-zinc-400">30초가 지났습니다. 이제 포기만 가능합니다.</p>}
+      </div>
+
+      {toastEl}
+      {grace&&<div className="fixed left-1/2 top-4 z-40 -translate-x-1/2 rounded-full bg-amber-500 px-5 py-3 text-xs font-bold text-white shadow-lg">⚠️ 3초 유예로 살았습니다. 다음엔 실패입니다.</div>}
+    </div>
+
+    {devPanel}
+
+    {fail&&(
+      <div className="flash fixed inset-0 z-50 flex items-center justify-center px-6">
+        <div className="shake w-full max-w-sm rounded-2xl bg-white p-7 text-center shadow-2xl">
+          <p className="text-5xl">🚨</p>
+          <h2 className="mt-4 text-2xl font-black text-red-600">딴짓 적발</h2>
+          <p className="mt-3 text-sm leading-relaxed text-zinc-600">집중 타이머 도중 화면을 벗어났습니다.<br/>루틴은 <b>실패</b> 처리되었습니다.</p>
+          <div className="mt-5 flex justify-center gap-6 rounded-xl bg-red-50 py-4">
+            <div><p className="text-[11px] text-red-400">예상 점수</p><p className="text-2xl font-black tnum text-red-600">−10</p></div>
+            <div><p className="text-[11px] text-red-400">연속 기록</p><p className="text-2xl font-black text-red-600">0</p></div>
+          </div>
+          <button onClick={retry} className="mt-5 w-full rounded-xl bg-red-600 py-3.5 text-sm font-bold text-white hover:bg-red-700">다시 집중한다</button>
+          <button onClick={quit} className="mt-2 w-full py-2 text-xs font-semibold text-zinc-400">오늘은 여기까지</button>
+        </div>
+      </div>
+    )}
+  </div>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
