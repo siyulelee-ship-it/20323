@@ -9,8 +9,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
 <style>
-  :root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-  html,body{background:#fff;color:#18181b}
+  :root{color-scheme:light}
+  html,body{background:#fff;color:#18181b;height:100%}
+  body{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
   body{font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Pretendard","Noto Sans KR",sans-serif;margin:0}
   .bg-fade{transition:background-color .8s ease}
   @keyframes pulseRing{0%{transform:scale(.92);opacity:.55}50%{transform:scale(1.04);opacity:.12}100%{transform:scale(.92);opacity:.55}}
@@ -30,6 +31,8 @@
   @keyframes bounceSoft{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
   .bounce-soft{animation:bounceSoft 3s ease-in-out infinite}
   button,input{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  .app-h{min-height:100vh;min-height:calc(100dvh - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px))}
+  .scroll-y{overflow-y:auto;-webkit-overflow-scrolling:touch}
   .tnum{font-variant-numeric:tabular-nums}
 </style>
 </head>
@@ -54,7 +57,9 @@ function beep(kind){
   }catch(e){}
 }
 
-const DEFAULTS={score:90,streak:0,coupons:0,done:0,sel:'hard',cf:40,cb:8};
+function defaultExam(){const t=new Date();let y=t.getFullYear();if(t>new Date(y,9,1,23,59,59))y+=1;return {name:'중간고사',date:y+'-10-01'};}
+const DEFAULTS={score:90,streak:0,coupons:0,done:0,sel:'hard',cf:40,cb:8,stats:{days:{},best:0},exam:defaultExam(),subjects:[],lastSub:''};
+const DARK_IN='rounded-lg border border-zinc-400 bg-zinc-500 px-3 py-2 text-base font-semibold text-white placeholder:text-zinc-200 outline-none focus:border-white focus:ring-2 focus:ring-zinc-300 [color-scheme:dark]';
 const canStore=(()=>{try{localStorage.setItem('__t','1');localStorage.removeItem('__t');return true;}catch(e){return false;}})();
 const store={
   get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}},
@@ -74,6 +79,7 @@ async function hashPw(salt,pw){
 }
 function loadUser(id){
   const d={...DEFAULTS,...(store.get('gst:data:'+id)||{})};
+  if(d.exam==null)d.exam=defaultExam();
   let notice=null;
   if(store.get('gst:active:'+id)){
     d.score=Math.max(0,d.score-10);d.streak=0;
@@ -89,9 +95,101 @@ function bootLoad(){
   return {user:null,data:DEFAULTS,notice:null};
 }
 
-function Hero(){
+const NOSUB='미지정';
+const WD=['일','월','화','수','목','금','토'];
+const PAL=['#93c5fd','#f9a8d4','#fcd34d','#86efac','#c4b5fd','#fdba74','#67e8f9','#fca5a5'];
+const pad2=n=>String(n).padStart(2,'0');
+const dayKey=(ts)=>{const d=new Date(ts);return d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());};
+const emptyDay=()=>({ms:0,done:0,fail:0,subj:{}});
+const addTime=(st,name,ms,ts)=>{const k=dayKey(ts);const d=st.days[k]||emptyDay();
+  const subj=(name&&name!==NOSUB)?{...d.subj,[name]:(d.subj[name]||0)+ms}:d.subj;
+  return {...st,days:{...st.days,[k]:{...d,ms:d.ms+ms,subj}}};};
+const bumpDay=(st,f,ts)=>{const k=dayKey(ts);const d=st.days[k]||emptyDay();
+  return {...st,days:{...st.days,[k]:{...d,[f]:(d[f]||0)+1}}};};
+const dday=(date,off=0)=>{const [y,m,d]=date.split('-').map(Number);const t=new Date();t.setDate(t.getDate()+off);
+  return Math.round((new Date(y,m-1,d)-new Date(t.getFullYear(),t.getMonth(),t.getDate()))/86400000);};
+const ddLabel=(n)=>n===0?'D-DAY':n>0?'D-'+n:'D+'+(-n);
+function fmtDur(ms){const t=Math.round(ms/1000);const h=Math.floor(t/3600),m=Math.floor(t%3600/60),sec=t%60;
+  if(h>0)return h+'시간 '+pad2(m)+'분';if(m>0)return m+'분 '+pad2(sec)+'초';return sec+'초';}
+const toB64=(str)=>{const bytes=new TextEncoder().encode(str);let bin='';bytes.forEach(b=>{bin+=String.fromCharCode(b);});return btoa(bin);};
+const fromB64=(b)=>{const bin=atob(b);return new TextDecoder().decode(Uint8Array.from(bin,c=>c.charCodeAt(0)));};
+const chk=(str)=>{let h=5381;for(let i=0;i<str.length;i++){h=((h<<5)+h+str.charCodeAt(i))|0;}return (h>>>0).toString(36);};
+
+function Stat({label,value,span}){
+  return(<div className={'rounded-2xl bg-zinc-50 px-4 py-3 '+(span?'col-span-2':'')}>
+    <p className="text-[11px] text-zinc-400">{label}</p>
+    <p className="mt-0.5 text-xl font-black tnum">{value}</p>
+  </div>);
+}
+function StatsView({stats,user,onBackup,off=0}){
+  const [range,setRange]=useState('week');
+  const now=Date.now()+off*86400000;
+  const todayK=dayKey(now);
+  const wk=new Date(now);wk.setDate(wk.getDate()-6);const weekK=dayKey(wk.getTime());
+  const inRange=(k)=>range==='all'?true:range==='today'?k===todayK:k>=weekK;
+  let ms=0,done=0,fail=0;const subj={};
+  Object.keys(stats.days||{}).forEach(k=>{
+    if(!inRange(k))return;const d=stats.days[k];
+    ms+=d.ms||0;done+=d.done||0;fail+=d.fail||0;
+    Object.entries(d.subj||{}).forEach(([n,v])=>{if(n===NOSUB)return;subj[n]=(subj[n]||0)+v;});
+  });
+  const rows=Object.entries(subj).sort((a,b)=>b[1]-a[1]);
+  const maxS=rows.length?rows[0][1]:1;
+  const week=[];
+  for(let i=6;i>=0;i--){const d=new Date(now);d.setDate(d.getDate()-i);const k=dayKey(d.getTime());
+    week.push({k,wd:WD[d.getDay()],ms:(stats.days[k]||{}).ms||0,today:i===0});}
+  const maxW=Math.max(1,...week.map(w=>w.ms));
+  const rate=(done+fail)>0?Math.round(done/(done+fail)*100)+'%':'-';
   return(
-  <svg viewBox="0 0 320 130" className="mx-auto h-28 w-auto" aria-hidden="true">
+  <div className="mt-2 space-y-4">
+    <div className="flex rounded-xl bg-zinc-100 p-1">
+      {[['today','오늘'],['week','최근 7일'],['all','전체']].map(([k,l])=>(
+        <button key={k} onClick={()=>setRange(k)} className={'flex-1 rounded-lg py-2 text-xs font-bold transition '+(range===k?'bg-white text-zinc-900 shadow-sm':'text-zinc-400')}>{l}</button>
+      ))}
+    </div>
+    <div className="grid grid-cols-2 gap-3">
+      <Stat span label="총 공부시간" value={fmtDur(ms)}/>
+      <Stat label="루틴 완수" value={done+'회'}/>
+      <Stat label="실패(딴짓·포기)" value={fail+'회'}/>
+      <Stat label="완수율" value={rate}/>
+      <Stat label="역대 최고 연속" value={(stats.best||0)+'회'}/>
+    </div>
+    <div className="rounded-2xl border border-zinc-200 p-4">
+      <p className="text-sm font-bold text-zinc-800">과목별 공부시간</p>
+      {rows.length===0&&<p className="mt-3 text-xs text-zinc-400">아직 기록이 없어요. 루틴을 시작하고 과목을 적어 보세요.</p>}
+      {rows.map(([n,v],i)=>(
+        <div key={n} className="mt-3">
+          <div className="flex items-baseline justify-between text-xs">
+            <span className="font-bold text-zinc-700">{n}</span>
+            <span className="tnum text-zinc-500">{fmtDur(v)} · {ms>0?Math.round(v/ms*100):0}%</span>
+          </div>
+          <div className="mt-1 h-2.5 overflow-hidden rounded-full bg-zinc-100">
+            <div className="h-full rounded-full" style={{width:(v/maxS*100)+'%',background:PAL[i%PAL.length]}}></div>
+          </div>
+        </div>
+      ))}
+      {rows.length>0&&ms-rows.reduce((a,r)=>a+r[1],0)>1000&&<p className="mt-3 text-[11px] text-zinc-400">과목 없이 공부한 {fmtDur(ms-rows.reduce((a,r)=>a+r[1],0))}는 총 공부시간에만 포함돼요.</p>}
+    </div>
+    <div className="rounded-2xl border border-zinc-200 p-4">
+      <p className="text-sm font-bold text-zinc-800">최근 7일 <span className="text-[11px] font-normal text-zinc-400">(단위: 분)</span></p>
+      <div className="mt-3 flex h-32 items-end justify-between gap-2">
+        {week.map(w=>(
+          <div key={w.k} className="flex flex-1 flex-col items-center justify-end">
+            <span className="mb-1 text-[10px] text-zinc-400 tnum">{w.ms>0?(w.ms<60000?'<1':Math.floor(w.ms/60000)):''}</span>
+            <div className="w-full rounded-md" style={{height:Math.max(w.ms>0?4:2,Math.round(w.ms/maxW*80))+'px',background:w.today?'#18181b':'#d4d4d8'}}></div>
+            <span className={'mt-1 text-[11px] '+(w.today?'font-bold text-zinc-900':'text-zinc-400')}>{w.wd}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+    <button onClick={onBackup} className="w-full rounded-xl border border-zinc-200 py-3 text-sm font-semibold text-zinc-600 hover:border-zinc-400">📦 기기 이동 · 백업 코드</button>
+    {!user&&<p className="text-center text-[11px] text-zinc-400">게스트 기록은 저장되지 않아요. 로그인하면 계속 쌓입니다.</p>}
+  </div>);
+}
+
+function Hero({cls='h-28'}){
+  return(
+  <svg viewBox="0 0 320 130" className={'mx-auto w-auto '+cls} aria-hidden="true">
     <ellipse cx="160" cy="122" rx="135" ry="6" fill="#f4f4f5"/>
     <rect x="66" y="94" width="112" height="24" rx="6" fill="#bfdbfe"/>
     <rect x="76" y="101" width="92" height="4" rx="2" fill="#93c5fd"/>
@@ -156,10 +254,42 @@ function App(){
   const userRef=useRef(user), runSecRef=useRef(0);
   userRef.current=user; runSecRef.current=runSec;
   const mark=(on)=>{const u=userRef.current;if(!u)return;if(on)store.set('gst:active:'+u,{t:Date.now()});else store.del('gst:active:'+u);};
+  const [stats,setStats]=useState(B.data.stats);
+  const [exam,setExam]=useState(B.data.exam);
+  const [subjects,setSubjects]=useState(B.data.subjects||[]);
+  const [subject,setSubject]=useState(B.data.lastSub||'');
+  const [newSub,setNewSub]=useState('');
+  const [tab,setTab]=useState('home');
+  const [examEdit,setExamEdit]=useState(false);
+  const [exName,setExName]=useState(''), [exDate,setExDate]=useState('');
+  const [sheet,setSheet]=useState(false);
+  const [bkCode,setBkCode]=useState(''), [bkIn,setBkIn]=useState(''), [bkErr,setBkErr]=useState('');
+  const [bkAsk,setBkAsk]=useState(false), [bkCopied,setBkCopied]=useState(false);
+  const [dateOff,setDateOff]=useState(0), [showRestore,setShowRestore]=useState(false);
+  const subjRef=useRef(B.data.lastSub||''), segStartRef=useRef(0), liveRef=useRef({}), pendingRef=useRef(false);
+  // 제작자 모드의 날짜 조절: 기록이 쌓이는 '오늘'도 같이 움직인다
+  const offRef=useRef(0); offRef.current=dateOff;
+  const vTs=(ts)=>ts+offRef.current*86400000;
+  // 과목 구간 측정: 열린 구간 하나만 존재. 과목 전환/이탈/종료 시점에 정확한 ms로 닫아서 합산한다.
+  const openSeg=(ts)=>{if(!segStartRef.current)segStartRef.current=ts;};
+  const closeSeg=(ts)=>{
+    const st=segStartRef.current; if(!st)return;
+    segStartRef.current=0;
+    const ms=Math.max(0,ts-st); if(ms<=0)return;
+    const nm=subjRef.current||NOSUB;
+    liveRef.current[nm]=(liveRef.current[nm]||0)+ms;
+    setStats(x=>addTime(x,nm,ms,vTs(ts)));
+  };
+  const liveNow=()=>{const o={...liveRef.current};
+    if(segStartRef.current){const k=subjRef.current||NOSUB;o[k]=(o[k]||0)+Math.max(0,Date.now()-segStartRef.current);}
+    return o;};
 
   const showToast=(t)=>{setToast(t);setTimeout(()=>setToast(null),2600);};
 
   const failRoutine=useCallback(()=>{
+    if(!runRef.current)return; runRef.current=false;
+    const fnow=Date.now(); closeSeg(fnow);
+    setStats(x=>bumpDay(x,'fail',vTs(fnow)));
     setRunning(false);setFail(true);mark(false);
     setScore(s=>Math.max(0,s-10));setStreak(0);beep('fail');
   },[]);
@@ -169,15 +299,21 @@ function App(){
       const armed = phaseRef.current==='focus'&&runRef.current&&!failRef.current;
       if(document.visibilityState==='hidden'){
         if(!armed)return;
+        if(graceT.current)return;
         hiddenAt.current=Date.now();
+        closeSeg(hiddenAt.current);
         graceT.current=setTimeout(()=>{graceT.current=null;failRoutine();},3000);
       }else{
+        if(pendingRef.current){
+          pendingRef.current=false;liveRef.current={};openSeg(Date.now());mark(true);
+          setRunSec(0);setRunning(true);showToast('휴식이 끝났어요. 집중 시작!');return;
+        }
         const away=hiddenAt.current?Date.now()-hiddenAt.current:0;
         if(graceT.current){clearTimeout(graceT.current);graceT.current=null;}
         hiddenAt.current=0;
         if(!armed)return;
         if(away>3000){failRoutine();}
-        else if(away>0){setGrace(true);setTimeout(()=>setGrace(false),2800);}
+        else if(away>0){openSeg(Date.now());setGrace(true);setTimeout(()=>setGrace(false),2800);}
       }
     };
     const onHide=(e)=>{if(!e.persisted&&phaseRef.current==='focus'&&runSecRef.current<30)mark(false);};
@@ -212,24 +348,28 @@ function App(){
       setStreak(n);
       if(n%3===0){setCoupons(c=>c+1);showToast("연속 3회 달성! '5분만!' 쿠폰 +1");}
       else showToast('집중 완수! 예상 점수 +2');
+      const tnow=Date.now();closeSeg(tnow);setStats(x=>({...bumpDay(x,'done',vTs(tnow)),best:Math.max(x.best||0,n)}));
       mark(false);setPhase('break');setTotal(plan.b*60);setLeft(plan.b*60);
     }else{
       showToast('휴식 끝. 다시 집중할 시간이야.');
-      mark(true);setPhase('focus');setTotal(plan.f*60);setLeft(plan.f*60);
+      setPhase('focus');setTotal(plan.f*60);setLeft(plan.f*60);
+      if(document.visibilityState==='hidden'){setRunning(false);pendingRef.current=true;}
+      else{mark(true);liveRef.current={};openSeg(Date.now());}
     }
   },[left,running]);
 
   // 자동 저장: 로그인 상태에서 값이 바뀔 때마다 이 브라우저에 기록
   useEffect(()=>{
     if(!user)return;
-    store.set('gst:data:'+user,{score,streak,coupons,done,sel,cf,cb});
-  },[user,score,streak,coupons,done,sel,cf,cb]);
+    store.set('gst:data:'+user,{score,streak,coupons,done,sel,cf,cb,stats,exam,subjects,lastSub:subject});
+  },[user,score,streak,coupons,done,sel,cf,cb,stats,exam,subjects,subject]);
 
   const enter=(id)=>{
     const r=loadUser(id);
     store.set('gst:session',id);
     setUser(id);setScore(r.data.score);setStreak(r.data.streak);setCoupons(r.data.coupons);
     setDone(r.data.done);setSel(r.data.sel);setCf(r.data.cf);setCb(r.data.cb);
+    setStats(r.data.stats);setExam(r.data.exam);setSubjects(r.data.subjects||[]);setSubject(r.data.lastSub||'');subjRef.current=r.data.lastSub||'';setTab('home');
     setNotice(r.notice);setAid('');setApw('');setApw2('');setAerr('');setScreen('setup');
   };
   const submitAuth=async()=>{
@@ -260,32 +400,157 @@ function App(){
   const logout=()=>{
     store.del('gst:session');
     setUser(null);setScore(90);setStreak(0);setCoupons(0);setDone(0);setSel('hard');setCf(40);setCb(8);
+    setStats(DEFAULTS.stats);setExam(defaultExam());setSubjects([]);setSubject('');subjRef.current='';setTab('home');
     setNotice(null);setMode('login');setAid('');setApw('');setApw2('');setAerr('');setScreen('auth');
   };
   const guest=()=>{setUser(null);setNotice(null);setScreen('setup');};
+
+  const switchSubject=(name)=>{
+    let nm=name.trim().slice(0,12);if(nm===NOSUB)nm='';
+    if(nm===subjRef.current)return;
+    const now=Date.now(), wasOpen=!!segStartRef.current;
+    closeSeg(now);
+    subjRef.current=nm;setSubject(nm);
+    if(nm)setSubjects(l=>[nm,...l.filter(x=>x!==nm)].slice(0,8));
+    if(wasOpen)openSeg(now);
+  };
+  const addSubject=()=>{const nm=newSub.trim();if(!nm)return;switchSubject(nm);setNewSub('');};
+  const saveExam=()=>{
+    if(!exDate){showToast('시험 날짜를 골라 주세요');return;}
+    setExam({name:exName.trim().slice(0,16),date:exDate});setExamEdit(false);
+  };
+  const makeBackup=()=>{
+    if(!user)return '';
+    const u=(store.get('gst:users')||{})[user];if(!u)return '';
+    const json=JSON.stringify({v:1,id:user,u,data:{score,streak,coupons,done,sel,cf,cb,stats,exam,subjects,lastSub:subject}});
+    return 'GST1.'+toB64(json)+'.'+chk(json);
+  };
+  const copyCode=async()=>{
+    try{await navigator.clipboard.writeText(bkCode);setBkCopied(true);}
+    catch(e){try{const t=document.getElementById('bkta');t.focus();t.select();document.execCommand('copy');setBkCopied(true);}
+      catch(e2){showToast('코드를 길게 눌러 직접 복사해 주세요');}}
+  };
+  const restoreBackup=()=>{
+    setBkErr('');
+    const parts=bkIn.replace(/\s+/g,'').split('.');
+    const bad='올바르지 않거나 잘린 코드예요. 전체를 다시 복사해 주세요.';
+    if(parts.length!==3||parts[0]!=='GST1'){setBkErr(bad);return;}
+    let json,obj;
+    try{json=fromB64(parts[1]);}catch(e){setBkErr(bad);return;}
+    if(chk(json)!==parts[2]){setBkErr(bad);return;}
+    try{obj=JSON.parse(json);}catch(e){setBkErr(bad);return;}
+    if(!obj||!/^[가-힣A-Za-z0-9_]{2,16}$/.test(obj.id||'')||!obj.u||typeof obj.u.salt!=='string'||typeof obj.u.hash!=='string'||!obj.data||typeof obj.data!=='object'){setBkErr(bad);return;}
+    const users=store.get('gst:users')||{};
+    if(users[obj.id]&&!bkAsk){setBkAsk(true);setBkErr('이 기기에 같은 아이디('+obj.id+')가 있어요. 덮어쓰려면 "덮어쓰기"를 누르세요.');return;}
+    users[obj.id]=obj.u;
+    if(!store.set('gst:users',users)||!store.set('gst:data:'+obj.id,obj.data)){setBkErr('이 브라우저에서는 저장할 수 없어요.');return;}
+    store.del('gst:active:'+obj.id);
+    setSheet(false);setBkIn('');setBkCode('');setBkAsk(false);setBkErr('');
+    enter(obj.id);showToast('복원 완료! '+obj.id+'님 환영합니다');
+  };
 
   const start=()=>{
     const p = sel==='custom'
       ? {name:'내 맘대로',f:Math.max(1,Math.min(180,+cf||1)),b:Math.max(1,Math.min(60,+cb||1))}
       : (()=>{const x=PRESETS.find(p=>p.key===sel);return{name:x.name,f:x.f,b:x.b};})();
-    setPlan(p);setPhase('focus');setLeft(p.f*60);setTotal(p.f*60);setRunSec(0);setNotice(null);mark(true);setRunning(true);setScreen('run');
+    setPlan(p);setPhase('focus');setLeft(p.f*60);setTotal(p.f*60);setRunSec(0);setNotice(null);pendingRef.current=false;liveRef.current={};openSeg(Date.now());mark(true);setRunning(true);setScreen('run');
   };
   const useCoupon=()=>{if(coupons<1)return;setCoupons(c=>c-1);setLeft(v=>v+300);setTotal(t=>t+300);showToast("'5분만!' 사용 — 휴식 5분 연장");};
-  const retry=()=>{setFail(false);setPhase('focus');setLeft(plan.f*60);setTotal(plan.f*60);setRunSec(0);mark(true);setRunning(true);};
+  const retry=()=>{setFail(false);setPhase('focus');setLeft(plan.f*60);setTotal(plan.f*60);setRunSec(0);pendingRef.current=false;liveRef.current={};openSeg(Date.now());mark(true);setRunning(true);};
   const canReturn = runSec<30;
-  const quit=()=>{setFail(false);setRunning(false);mark(false);setScreen('setup');};
+  const quit=()=>{setFail(false);setRunning(false);closeSeg(Date.now());pendingRef.current=false;mark(false);setScreen('setup');};
 
   const isBreak=phase==='break';
   const pct=Math.max(0,Math.min(1,1-left/total));
   const prevPct=useRef(0); const rewind=pct<prevPct.current; prevPct.current=pct;
   const R=140,C=2*Math.PI*R;
 
+  const chipList=[...(subject?[subject]:[]),...subjects.filter(n=>n!==subject)].slice(0,6);
+  const liveNamed=Object.entries(liveNow()).filter(([n])=>n!==NOSUB);
+  // 휴식 중에는 과목 입력/측정 없음 (집중 구간만 잰다)
+  const subjectEl=isBreak?null:(
+    <div className="mb-2 w-full rounded-2xl border border-zinc-200 bg-white/80 p-2">
+      <p className="mb-1.5 text-[11px] font-semibold text-zinc-400">{subject?('📖 '+subject+' 공부 중 · 탭하면 해제'):'과목 미선택 · 총 시간에만 포함'}</p>
+      {chipList.length>0&&(
+        <div className="mb-1.5 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+          {chipList.map(n=>(
+            <button key={n} onClick={()=>switchSubject(subject===n?'':n)}
+              className={'min-h-[40px] shrink-0 rounded-full px-4 py-2 text-sm font-bold '+(subject===n?'bg-zinc-900 text-white':'bg-zinc-100 text-zinc-700')}>{n}</button>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input value={newSub} onChange={e=>setNewSub(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')addSubject();}} maxLength={12} placeholder="새 과목 (예: 수학)"
+          className={'w-0 min-w-0 flex-1 '+DARK_IN}/>
+        <button onClick={addSubject} className="shrink-0 rounded-lg bg-zinc-900 px-6 py-2 text-sm font-bold text-white">전환</button>
+      </div>
+      {liveNamed.length>0&&<p className="mt-1.5 truncate text-center text-[11px] text-zinc-400 tnum">이번 루틴 · {liveNamed.map(([n,v])=>n+' '+fmt(Math.floor(v/1000))).join(' · ')}</p>}
+    </div>
+  );
+  const ddayEl=exam?(
+    <button onClick={()=>{setExName(exam.name);setExDate(exam.date);setExamEdit(true);}} className="flex flex-col items-center justify-center rounded-2xl bg-zinc-50 px-3 py-3 text-center">
+      <span className="text-[11px] font-semibold text-zinc-400">📅 {exam.name||'시험'}</span>
+      <span className="text-4xl font-black leading-tight tnum">{ddLabel(dday(exam.date,dateOff))}</span>
+      <span className="text-[11px] text-zinc-400 tnum">{exam.date.slice(5).replace('-','/')} · 탭해서 변경</span>
+    </button>
+  ):(
+    <button onClick={()=>{setExName('');setExDate('');setExamEdit(true);}} className="flex items-center justify-center rounded-2xl border border-dashed border-zinc-300 px-3 py-3 text-center text-sm font-semibold text-zinc-400">📅 시험 D-day<br/>설정하기</button>
+  );
+  const examSheetEl=examEdit?(
+    <div className="fixed inset-0 z-[55] flex items-end justify-center bg-black/30 p-3 sm:items-center" onClick={()=>setExamEdit(false)}>
+      <div className="w-full max-w-md space-y-3 rounded-2xl bg-white p-5 shadow-2xl" onClick={e=>e.stopPropagation()}>
+        <h3 className="text-base font-black">📅 시험 D-day</h3>
+        <label className="block text-xs font-semibold text-zinc-500">시험 이름
+          <input value={exName} onChange={e=>setExName(e.target.value)} maxLength={16} placeholder="예: 기말고사" className={'mt-1 w-full '+DARK_IN}/>
+        </label>
+        <label className="block text-xs font-semibold text-zinc-500">시험 날짜
+          <input type="date" value={exDate} onChange={e=>setExDate(e.target.value)} className={'mt-1 w-full '+DARK_IN}/>
+        </label>
+        <div className="flex gap-2">
+          <button onClick={saveExam} className="flex-1 rounded-lg bg-zinc-900 py-3 text-sm font-bold text-white">저장</button>
+          {exam&&<button onClick={()=>{setExam(false);setExamEdit(false);}} className="rounded-lg bg-zinc-100 px-4 py-3 text-sm font-bold text-zinc-500">삭제</button>}
+          <button onClick={()=>setExamEdit(false)} className="rounded-lg bg-zinc-100 px-4 py-3 text-sm font-bold text-zinc-500">취소</button>
+        </div>
+      </div>
+    </div>
+  ):null;
+  const vToday=(()=>{const d=new Date();d.setDate(d.getDate()+dateOff);return dayKey(d.getTime());})();
+  const sheetEl=sheet?(
+    <div className="fixed inset-0 z-[55] flex items-end justify-center bg-black/30 p-3 sm:items-center" onClick={()=>setSheet(false)}>
+      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-black">기기 이동 · 백업</h3>
+          <button onClick={()=>setSheet(false)} className="text-sm font-semibold text-zinc-400">닫기</button>
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-zinc-500">기록은 이 기기에만 저장돼요. 백업 코드를 만들어 다른 기기에서 붙여넣으면 같은 아이디·비밀번호로 이어서 쓸 수 있어요.</p>
+        {user&&(
+          <div className="mt-4">
+            <p className="text-xs font-bold text-zinc-700">① 이 기기에서 내보내기</p>
+            <button onClick={()=>{setBkCode(makeBackup());setBkCopied(false);}} className="mt-2 w-full rounded-lg bg-zinc-900 py-3 text-sm font-bold text-white">백업 코드 만들기</button>
+            {bkCode&&(<div>
+              <textarea id="bkta" readOnly value={bkCode} rows={4} onFocus={e=>e.target.select()} className="mt-2 w-full break-all rounded-lg border border-zinc-200 bg-zinc-50 p-2 text-base leading-snug"/>
+              <button onClick={copyCode} className="mt-2 w-full rounded-lg bg-zinc-100 py-3 text-sm font-bold text-zinc-700">{bkCopied?'복사됨 ✓':'코드 복사'}</button>
+            </div>)}
+            <p className="mt-2 text-[11px] leading-relaxed text-amber-600">코드에는 로그인 정보와 기록이 들어 있어요. 남에게 보여 주지 마세요.</p>
+          </div>
+        )}
+        <div className="mt-5">
+          <p className="text-xs font-bold text-zinc-700">{user?'② ':''}다른 기기에서 불러오기</p>
+          <textarea value={bkIn} onChange={e=>{setBkIn(e.target.value);setBkAsk(false);setBkErr('');}} rows={4} placeholder="GST1. 로 시작하는 코드를 붙여넣으세요"
+            className="mt-2 w-full break-all rounded-lg border border-zinc-200 p-2 text-base leading-snug outline-none focus:border-zinc-900"/>
+          {bkErr&&<p className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{bkErr}</p>}
+          <button onClick={restoreBackup} disabled={!bkIn.trim()} className="mt-2 w-full rounded-lg bg-zinc-900 py-3 text-sm font-bold text-white disabled:opacity-40">{bkAsk?'덮어쓰기':'복원하기'}</button>
+        </div>
+      </div>
+    </div>
+  ):null;
+
   const toastEl = toast ? (
     <div className="pointer-events-none fixed left-1/2 top-16 z-[60] -translate-x-1/2 rounded-full bg-zinc-900 px-5 py-3 text-xs font-semibold text-white shadow-lg">{toast}</div>
   ) : null;
 
   const devPanel = (
-    <div className="fixed bottom-4 right-4 z-[45] flex flex-col items-end gap-2" style={{paddingBottom:'env(safe-area-inset-bottom,0px)'}}>
+    <div className="fixed bottom-3 right-3 z-[45] flex flex-col items-end gap-2" style={{paddingBottom:'env(safe-area-inset-bottom,0px)'}}>
       {devOpen&&(
         <div className="max-h-[65vh] w-[min(15rem,calc(100vw-2rem))] overflow-y-auto rounded-xl border border-zinc-200 bg-white p-4 shadow-xl">
           {!devOk?(
@@ -309,6 +574,22 @@ function App(){
                 <button onClick={()=>setCoupons(c=>c+1)} className="flex-1 rounded-lg bg-zinc-100 py-3 text-xs font-bold">쿠폰 +1</button>
                 <button onClick={()=>setStreak(x=>x+1)} className="flex-1 rounded-lg bg-zinc-100 py-3 text-xs font-bold">연속 +1</button>
               </div>
+              <div className="space-y-2">
+                <p className="text-center text-[11px] text-zinc-400 tnum">가상 오늘 {vToday}{dateOff!==0?' ('+(dateOff>0?'+':'')+dateOff+'일)':''}</p>
+                <div className="flex gap-2">
+                  <button onClick={()=>setDateOff(o=>o-1)} className="flex-1 rounded-lg bg-zinc-100 py-3 text-xs font-bold">−1일</button>
+                  <button onClick={()=>setDateOff(o=>o+1)} className="flex-1 rounded-lg bg-zinc-100 py-3 text-xs font-bold">+1일</button>
+                  <button onClick={()=>setDateOff(o=>o+7)} className="flex-1 rounded-lg bg-zinc-100 py-3 text-xs font-bold">+7일</button>
+                </div>
+                <input type="date" value={vToday} onChange={e=>{
+                    const v=e.target.value; if(!v)return;
+                    const [y,m,d]=v.split('-').map(Number);
+                    const t=new Date(); const base=new Date(t.getFullYear(),t.getMonth(),t.getDate());
+                    setDateOff(Math.round((new Date(y,m-1,d)-base)/86400000));
+                  }}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm tnum outline-none focus:border-zinc-900"/>
+                {dateOff!==0&&<button onClick={()=>setDateOff(0)} className="w-full rounded-lg bg-zinc-100 py-3 text-xs font-bold">오늘로 되돌리기</button>}
+              </div>
               {screen==='run'&&(
                 <div className="space-y-2">
                   <div className="flex gap-2">
@@ -319,13 +600,13 @@ function App(){
                   <button onClick={()=>{setRunSec(x=>x+30);setLeft(v=>Math.max(0,v-30));showToast('30초 경과시킴');}} className="w-full rounded-lg bg-zinc-100 py-3 text-xs font-bold">30초 경과시키기</button>
                 </div>
               )}
-              <button onClick={()=>{setScore(90);setStreak(0);setCoupons(0);setDone(0);showToast('기록 초기화');}}
+              <button onClick={()=>{setScore(90);setStreak(0);setCoupons(0);setDone(0);setStats(DEFAULTS.stats);showToast('기록 초기화');}}
                 className="w-full rounded-lg border border-zinc-200 py-3 text-xs font-semibold text-zinc-500">전체 초기화</button>
             </div>
           )}
         </div>
       )}
-      <button onClick={()=>setDevOpen(o=>!o)} className="h-11 w-11 rounded-full border border-zinc-200 bg-white text-base shadow-md">⚙️</button>
+      <button onClick={()=>setDevOpen(o=>!o)} className="h-10 w-10 rounded-full border border-zinc-200 bg-white text-base shadow-md">⚙️</button>
     </div>
   );
 
@@ -333,15 +614,15 @@ function App(){
     const inp="mt-1 w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-base outline-none focus:border-zinc-900";
     const enterKey=(e)=>{if(e.key==='Enter')submitAuth();};
     return(
-    <div className="relative min-h-screen overflow-hidden bg-white px-5 py-10 flex flex-col items-center">
+    <div className="app-h scroll-y relative flex flex-col items-center bg-white px-5 py-4">
       <span className="floaty pointer-events-none absolute left-3 top-10 text-2xl opacity-60">☁️</span>
       <span className="floaty pointer-events-none absolute right-4 top-16 text-2xl opacity-60" style={{animationDelay:'-4s'}}>✏️</span>
       <div className="relative z-10 w-full max-w-sm">
-        <Hero/>
+        <Hero cls="h-20"/>
         <p className="mt-4 text-center text-xs tracking-[.3em] text-zinc-400">STUDY OR DIE</p>
         <h1 className="mt-2 text-center text-4xl font-black tracking-tight">공부할 시간</h1>
-        <p className="mt-3 text-center text-sm text-zinc-500">아이디로 기록을 저장하고 언제든 이어서 하세요.</p>
-        <div className="mt-6 flex rounded-xl bg-zinc-100 p-1">
+        <p className="mt-2 text-center text-sm text-zinc-500">아이디로 기록을 저장하고 언제든 이어서 하세요.</p>
+        <div className="mt-4 flex rounded-xl bg-zinc-100 p-1">
           {[['login','로그인'],['signup','회원가입']].map(([k,l])=>(
             <button key={k} onClick={()=>{setMode(k);setAerr('');}}
               className={`flex-1 rounded-lg py-2 text-sm font-bold transition ${mode===k?'bg-white text-zinc-900 shadow-sm':'text-zinc-400'}`}>{l}</button>
@@ -362,86 +643,112 @@ function App(){
         </div>
         {aerr&&<p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{aerr}</p>}
         {!canStore&&<p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">이 브라우저는 저장을 막고 있어요. 게스트로만 이용할 수 있습니다.</p>}
-        <button onClick={submitAuth} disabled={abusy} className="mt-5 w-full rounded-xl bg-zinc-900 py-4 text-base font-bold text-white transition hover:bg-black active:scale-[.99] disabled:opacity-60">{mode==='signup'?'가입하고 시작하기':'로그인'}</button>
-        <button onClick={guest} className="mt-3 w-full py-2 text-sm font-semibold text-zinc-400 hover:text-zinc-700">로그인 없이 체험하기</button>
-        <p className="mt-4 text-center text-[11px] leading-relaxed text-zinc-400">기록은 이 기기의 브라우저에만 저장돼요.<br/>다른 기기에서는 이어지지 않습니다.</p>
+        <button onClick={submitAuth} disabled={abusy} className="mt-4 w-full rounded-xl bg-zinc-900 py-3.5 text-base font-bold text-white transition hover:bg-black active:scale-[.99] disabled:opacity-60">{mode==='signup'?'가입하고 시작하기':'로그인'}</button>
+        <button onClick={guest} className="mt-2 w-full py-2 text-sm font-semibold text-zinc-400 hover:text-zinc-700">로그인 없이 체험하기</button>
+        {showRestore?(
+          <button onClick={()=>setSheet(true)} className="w-full py-2 text-sm font-semibold text-zinc-400 underline decoration-zinc-300 underline-offset-4 hover:text-zinc-700">📦 백업 코드 붙여넣고 이어하기</button>
+        ):(
+          <button onClick={()=>setShowRestore(true)} className="w-full py-2 text-sm font-semibold text-zinc-400 hover:text-zinc-700">쓰던 기기에서 넘어오셨나요?</button>
+        )}
+        <p className="mt-3 text-center text-[11px] leading-relaxed text-zinc-400">기록은 이 기기의 브라우저에만 저장돼요.<br/>다른 기기로는 백업 코드로 옮길 수 있어요.</p>
       </div>
-      {toastEl}
+      {sheetEl}{toastEl}
     </div>);
   }
 
   if(screen==='setup'){
+    const tile=(on)=>'flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition '+(on?'border-zinc-900 bg-zinc-900 text-white':'border-zinc-200 hover:border-zinc-400');
     return(
-    <div className="relative min-h-screen overflow-hidden bg-white px-5 py-10 flex flex-col items-center">
-      <span className="floaty pointer-events-none absolute left-3 top-24 text-2xl opacity-60">☁️</span>
-      <span className="floaty pointer-events-none absolute right-4 top-28 text-2xl opacity-60" style={{animationDelay:'-4s'}}>✏️</span>
-      <div className="relative z-10 w-full max-w-lg">
-        <div className="mb-3 flex items-center justify-between text-xs">
-          {user?<span className="rounded-full bg-zinc-100 px-3 py-1.5 font-semibold text-zinc-600">👤 {user}</span>:<span className="text-zinc-400">게스트 · 기록이 저장되지 않아요</span>}
-          {user?<button onClick={logout} className="font-semibold text-zinc-400 hover:text-zinc-700">로그아웃</button>:<button onClick={()=>setScreen('auth')} className="font-semibold text-zinc-700 underline">로그인하고 저장하기</button>}
-        </div>
-        {notice&&<div onClick={()=>setNotice(null)} className="mb-3 rounded-xl bg-red-50 px-4 py-3 text-xs font-semibold leading-relaxed text-red-600">🚨 {notice}</div>}
-        <Hero/>
-        <p className="mt-4 text-xs tracking-[.3em] text-zinc-400">STUDY OR DIE</p>
-        <h1 className="mt-2 text-4xl font-black tracking-tight">공부할 시간</h1>
-        <p className="mt-3 text-sm leading-relaxed text-zinc-500">집중 타이머가 도는 동안 탭을 벗어나면 그 루틴은 <b className="text-red-500">즉시 실패</b>하고 예상 점수가 10점 깎입니다.</p>
-        <div className="mt-8 rounded-2xl border border-zinc-200 p-5 text-center">
-          <p className="text-xs font-semibold tracking-wide text-zinc-400">당신의 예상 시험 점수</p>
-          <p className="mt-1 text-6xl font-black tnum">{score}</p>
-          <div className="mt-3 flex justify-center gap-6 text-xs text-zinc-500">
-            <span>🔥 연속 {streak}회</span><span>🎟️ 쿠폰 {coupons}개</span><span>✅ 완수 {done}회</span>
+    <div className="app-h relative flex flex-col overflow-x-hidden overflow-y-auto bg-white px-4 pb-14 pt-2">
+      <span className="floaty pointer-events-none absolute right-8 top-16 text-xl opacity-40">☁️</span>
+      <div className="relative z-10 mx-auto flex w-full min-h-0 max-w-lg flex-1 flex-col">
+        <div className="flex items-center justify-between gap-2">
+          {tab==='home'?<span/>:<span className="shrink-0 text-base font-black tracking-tight">⏱️ 공부할 시간</span>}
+          <div className="flex min-w-0 items-center gap-3 text-xs">
+            {user?(<>
+              <span className="max-w-[6rem] truncate font-semibold text-zinc-500">👤 {user}</span>
+              <button onClick={()=>setSheet(true)} aria-label="백업" className="text-base">📦</button>
+              <button onClick={logout} className="shrink-0 font-semibold text-zinc-400">로그아웃</button>
+            </>):(<>
+              <span className="text-zinc-400">게스트 · 저장 안 됨</span>
+              <button onClick={()=>setScreen('auth')} className="shrink-0 font-semibold text-zinc-700 underline">로그인</button>
+            </>)}
           </div>
         </div>
-        <p className="mt-8 mb-3 text-sm font-semibold text-zinc-700">루틴 선택</p>
-        <div className="space-y-2">
-          {PRESETS.map(p=>(
-            <button key={p.key} onClick={()=>setSel(p.key)}
-              className={`w-full rounded-xl border p-4 text-left transition ${sel===p.key?'border-zinc-900 bg-zinc-900 text-white':'border-zinc-200 hover:border-zinc-400'}`}>
-              <div className="flex items-center gap-3">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-2xl" style={{background:p.tint}}>{p.icon}</span>
-                <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between">
-                <span className="text-base font-bold">{p.name}</span>
-                <span className={`text-sm tnum ${sel===p.key?'text-zinc-300':'text-zinc-500'}`}>{p.f}분 집중 / {p.b}분 휴식</span>
-              </div>
-              <p className={`mt-1 text-xs ${sel===p.key?'text-zinc-400':'text-zinc-400'}`}>{p.desc}</p>
-            </div>
-              </div>
-            </button>
+        {notice&&<div onClick={()=>setNotice(null)} className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold leading-relaxed text-red-600">🚨 {notice}</div>}
+        <div className="mt-2 flex rounded-xl bg-zinc-100 p-1">
+          {[['home','🏠 홈'],['stats','📊 통계']].map(([k,l])=>(
+            <button key={k} onClick={()=>setTab(k)} className={'flex-1 rounded-lg py-1.5 text-sm font-bold transition '+(tab===k?'bg-white text-zinc-900 shadow-sm':'text-zinc-400')}>{l}</button>
           ))}
-          <button onClick={()=>setSel('custom')}
-            className={`w-full rounded-xl border p-4 text-left transition ${sel==='custom'?'border-zinc-900 bg-zinc-900 text-white':'border-zinc-200 hover:border-zinc-400'}`}>
-            <div className="flex items-center gap-3">
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-100 text-2xl">🎨</span>
-              <div className="min-w-0 flex-1">
-              <span className="text-base font-bold">내 맘대로</span>
-            <p className={`mt-1 text-xs ${sel==='custom'?'text-zinc-400':'text-zinc-400'}`}>집중/휴식 시간을 직접 정하기</p>
-          </div>
+        </div>
+        {tab==='stats'?(<div className="scroll-y mt-1 min-h-0 flex-1 pb-2"><StatsView stats={stats} user={user} onBackup={()=>setSheet(true)} off={dateOff}/></div>):(
+        <div className="mt-3 flex min-h-0 flex-1 flex-col">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-zinc-200 px-3 py-3 text-center">
+              <p className="text-[11px] font-semibold text-zinc-400">당신의 예상 시험 점수</p>
+              <p className="text-5xl font-black leading-tight tnum">{score}</p>
+              <p className="text-[11px] text-zinc-500 tnum">🔥 연속 {streak} · 🎟️ {coupons} · ✅ {done}</p>
             </div>
-          </button>
+            {ddayEl}
+          </div>
+          <p className="mb-2 mt-4 text-xs font-semibold text-zinc-500">루틴 선택</p>
+          <div className="space-y-2">
+            {PRESETS.map(p=>(
+              <button key={p.key} onClick={()=>setSel(p.key)} className={tile(sel===p.key)+' w-full'}>
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xl" style={{background:p.tint}}>{p.icon}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-baseline justify-between gap-2"><span className="text-sm font-bold">{p.name}</span><span className={'shrink-0 text-[11px] tnum '+(sel===p.key?'text-zinc-300':'text-zinc-500')}>{p.f}분 집중 / {p.b}분 휴식</span></span>
+                  <span className={'mt-0.5 block text-[11px] '+(sel===p.key?'text-zinc-400':'text-zinc-400')}>{p.desc}</span>
+                </span>
+              </button>
+            ))}
+            <button onClick={()=>setSel('custom')} className={tile(sel==='custom')+' w-full'}>
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-xl">🎨</span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-baseline justify-between gap-2"><span className="text-sm font-bold">내 맘대로</span><span className={'shrink-0 text-[11px] tnum '+(sel==='custom'?'text-zinc-300':'text-zinc-500')}>{cf||'?'}분 / {cb||'?'}분</span></span>
+                <span className={'mt-0.5 block text-[11px] '+(sel==='custom'?'text-zinc-400':'text-zinc-400')}>집중/휴식 시간을 직접 정하기</span>
+              </span>
+            </button>
+          </div>
           {sel==='custom'&&(
-            <div className="flex gap-3 rounded-xl bg-zinc-50 p-4">
+            <div className="mt-2 flex gap-2 rounded-xl bg-zinc-50 p-2.5">
               {[['집중(분)',cf,setCf,180],['휴식(분)',cb,setCb,60]].map(([l,v,set,max])=>(
-                <label key={l} className="flex-1 text-xs text-zinc-500">{l}
+                <label key={l} className="flex-1 text-[11px] text-zinc-500">{l}
                   <input type="number" min="1" max={max} value={v} onChange={e=>set(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-lg font-bold tnum text-zinc-900 outline-none focus:border-zinc-900"/>
+                    className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-base font-bold tnum text-zinc-900 outline-none focus:border-zinc-900"/>
                 </label>
               ))}
             </div>
           )}
-        </div>
-        <button onClick={start} className="mt-8 w-full rounded-xl bg-zinc-900 py-4 text-base font-bold text-white transition hover:bg-black active:scale-[.99]">시작하기</button>
-        <p className="mt-3 text-center text-xs text-zinc-400">시작하면 다른 탭으로 못 갑니다. 정말입니다.</p>
-        <div className="mt-8 flex justify-center gap-5 text-2xl opacity-80">
-          <span className="bounce-soft">📚</span><span className="bounce-soft" style={{animationDelay:'-1s'}}>☕</span><span className="bounce-soft" style={{animationDelay:'-2s'}}>🧠</span>
-        </div>
+          <div className="mt-2 rounded-xl bg-zinc-50 p-2.5">
+            <p className="mb-1.5 text-[11px] font-semibold text-zinc-500">오늘 공부할 과목 <span className="font-normal text-zinc-400">(선택)</span></p>
+            {chipList.length>0&&(
+              <div className="mb-1.5 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                {chipList.map(n=>(
+                  <button key={n} onClick={()=>switchSubject(subject===n?'':n)}
+                    className={'min-h-[40px] shrink-0 rounded-full px-4 py-2 text-sm font-bold '+(subject===n?'bg-zinc-900 text-white':'border border-zinc-200 bg-white text-zinc-700')}>{n}</button>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input value={newSub} onChange={e=>setNewSub(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')addSubject();}} maxLength={12} placeholder="새 과목 (예: 수학)"
+                className={'w-0 min-w-0 flex-1 '+DARK_IN}/>
+              <button onClick={addSubject} className="shrink-0 rounded-lg bg-zinc-900 px-6 py-2 text-sm font-bold text-white">추가</button>
+            </div>
+          </div>
+          <div className="mt-auto pt-4">
+            <button onClick={start} className="w-full rounded-xl bg-zinc-900 py-3.5 text-base font-bold text-white transition hover:bg-black active:scale-[.99]">시작하기</button>
+            <p className="mt-2 text-center text-[11px] text-zinc-400">시작하면 다른 탭으로 못 갑니다. 정말입니다.</p>
+          </div>
+        </div>)}
       </div>
-      {devPanel}{toastEl}
+      {devPanel}{sheetEl}{examSheetEl}{toastEl}
     </div>);
   }
 
+  const inFocusRun=!isBreak&&running;
   return(
-  <div className={`bg-fade min-h-screen ${isBreak?'bg-[#eefaf7]':'bg-white'} relative overflow-hidden`}>
+  <div className={`bg-fade app-h ${isBreak?'bg-[#eefaf7]':'bg-white'} relative overflow-hidden`}>
     {isBreak&&(<div className="pointer-events-none absolute inset-0">
       <div className="floaty absolute left-[8%] top-[14%] h-28 w-52 rounded-full bg-white/70 blur-xl"></div>
       <div className="floaty absolute right-[10%] top-[26%] h-24 w-44 rounded-full bg-sky-100/80 blur-xl" style={{animationDelay:'-3s'}}></div>
@@ -450,16 +757,16 @@ function App(){
       </div>
     </div>)}
 
-    <div className="relative mx-auto flex min-h-screen max-w-lg flex-col items-center px-5 py-8">
+    <div className="app-h relative mx-auto flex max-w-lg flex-col items-center px-4 pb-14 pt-2">
       <div className="w-full text-center">
         <p className="text-[11px] font-semibold tracking-wide text-zinc-400">당신의 예상 시험 점수</p>
-        <p className="text-5xl font-black tnum text-zinc-900">{score}</p>
-        <div className="mt-2 flex justify-center gap-4 text-[11px] text-zinc-500">
-          <span>🔥 연속 {streak}회</span><span>🎟️ 쿠폰 {coupons}개</span><span>{plan.name} · {plan.f}/{plan.b}</span>
+        <p className="text-4xl font-black leading-tight tnum text-zinc-900">{score}</p>
+        <div className="mt-0.5 flex flex-wrap justify-center gap-x-3 text-[11px] text-zinc-500">
+          <span>🔥 연속 {streak}회</span><span>🎟️ 쿠폰 {coupons}개</span><span>{plan.name} · {plan.f}/{plan.b}</span>{exam&&<span>📅 {ddLabel(dday(exam.date,dateOff))}</span>}
         </div>
       </div>
 
-      <div className="relative my-auto flex aspect-square w-[min(340px,84vw)] items-center justify-center">
+      <div className="relative my-auto flex aspect-square w-[min(290px,74vw)] max-w-[38vh] items-center justify-center py-1">
         {!isBreak&&<div className="pulse-ring absolute h-[88%] w-[88%] rounded-full bg-zinc-200"></div>}
         <svg className="absolute h-[94%] w-[94%] -rotate-90" viewBox="0 0 320 320">
           <circle cx="160" cy="160" r={R} fill="none" stroke={isBreak?'#c8ece4':'#f0f0f1'} strokeWidth="6"/>
@@ -468,29 +775,31 @@ function App(){
         </svg>
         <div className="relative text-center">
           <p className={`text-xs font-bold tracking-[.25em] ${isBreak?'text-teal-600':'text-zinc-400'}`}>{isBreak?'휴식 중':'집중 중'}</p>
-          <p className="mt-1 text-[clamp(3.5rem,17vw,4.5rem)] font-black leading-none tnum tracking-tight text-zinc-900">{fmt(left)}</p>
-          <p className="mt-2 text-xs text-zinc-400">{isBreak?'곧 다시 시작합니다':'탭을 벗어나면 실패'}</p>
+          <p className="mt-1 text-[clamp(2.7rem,14.5vw,3.9rem)] font-black leading-none tnum tracking-tight text-zinc-900">{fmt(left)}</p>
+          <p className="mt-1.5 text-[11px] text-zinc-400">{isBreak?'곧 다시 시작합니다':'탭을 벗어나면 실패'}</p>
         </div>
       </div>
 
-      <div className="w-full space-y-3">
+      {subjectEl}
+      <div className="w-full space-y-2">
         {isBreak&&(
           <button onClick={useCoupon} disabled={coupons<1}
-            className={`w-full rounded-xl py-4 text-sm font-bold transition ${coupons>0?'bg-teal-600 text-white hover:bg-teal-700':'bg-zinc-100 text-zinc-400'}`}>
+            className={`w-full rounded-xl py-3.5 text-sm font-bold transition ${coupons>0?'bg-teal-600 text-white hover:bg-teal-700':'bg-zinc-100 text-zinc-400'}`}>
             🎟️ 5분만! 쿠폰 사용하기 ({coupons}개)
           </button>
         )}
-        {!isBreak&&running&&canReturn&&(
-          <button onClick={quit} className="w-full rounded-xl border border-zinc-300 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
-            돌아가기 · 페널티 없음 ({30-runSec}초 남음)
+        {inFocusRun&&canReturn?(
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={quit} className="rounded-xl border border-zinc-300 py-3 text-sm font-semibold text-zinc-700 hover:bg-zinc-50">돌아가기 ({Math.max(0,30-runSec)}초)</button>
+            <button disabled className="rounded-xl border border-zinc-100 py-3 text-sm font-semibold text-zinc-300">포기하기</button>
+          </div>
+        ):(
+          <button onClick={()=>{if(inFocusRun){failRoutine();}else{quit();}}}
+            className="w-full rounded-xl border border-zinc-200 py-3 text-sm font-semibold text-zinc-500 hover:border-zinc-400">
+            {inFocusRun?'포기하기 (−10점)':'루틴 종료'}
           </button>
         )}
-        <button onClick={()=>{if(!isBreak&&running){failRoutine();}else{quit();}}}
-          disabled={!isBreak&&running&&canReturn}
-          className={`w-full rounded-xl border py-3 text-sm font-semibold ${!isBreak&&running&&canReturn?'border-zinc-100 text-zinc-300':'border-zinc-200 text-zinc-500 hover:border-zinc-400'}`}>
-          {!isBreak&&running?'포기하기 (−10점)':'루틴 종료'}
-        </button>
-        {!isBreak&&running&&!canReturn&&<p className="text-center text-[11px] text-zinc-400">30초가 지났습니다. 이제 포기만 가능합니다.</p>}
+        {inFocusRun&&<p className="text-center text-[11px] text-zinc-400">{canReturn?'시작 30초 안에는 페널티 없이 돌아갈 수 있어요':'30초가 지났습니다. 이제 포기만 가능합니다.'}</p>}
       </div>
 
       {toastEl}
